@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.json.bak
+backup*.json
+camelock-backup-*.json

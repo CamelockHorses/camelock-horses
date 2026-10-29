@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Camelock Horses</title>
+<meta name="description" content="Stud book and herd register for Camelock Rural">
+<meta name="theme-color" content="#2c5a46">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Camelock">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Public+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<section id="login" class="login" hidden>
+  <form id="login-form" class="login-card">
+    <h1>Camelock Horses</h1>
+    <p>Sign in to open the stud book.</p>
+    <div class="field"><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="username" required></div>
+    <div class="field"><label for="login-pass">Password</label><input id="login-pass" type="password" autocomplete="current-password" required></div>
+    <button id="login-btn" class="btn primary" type="submit">Sign in</button>
+    <button id="login-reset" class="link" type="button">Forgot password</button>
+    <p id="login-msg" class="login-msg" role="status"></p>
+  </form>
+</section>
+
+<div id="shell" hidden>
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><h1>Camelock Horses</h1><span id="sync" class="sync" data-state="ok">Synced</span></div>
+    <button class="btn" id="add-horse" type="button" hidden>+ Add horse</button>
+  </div>
+</header>
+
+<div class="wrap"><main id="app">
+  <div class="empty"><h3>Opening the stud book…</h3><p>Your horses, health records and breeding records will appear here.</p></div>
+</main></div>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
