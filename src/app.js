@@ -88,6 +88,12 @@ const byName = (name) => { if (!name) return null; const n = name.trim().toLower
 const resolve = (id, name) => (id && S.horses.get(id)) || byName(name) || null;
 const parentName = (h, which) => { const p = resolve(h[which + "Id"], h[which + "Name"]); return p ? p.name : (h[which + "Name"] || ""); };
 const recsFor = (id) => S.records.filter(r => r.horseId === id);
+// Embryo transfer: records stay on the donor's file and name the recipient who carries the foal
+const isET = (r) => !!(r.recipientId || r.recipientName);
+const isRecipient = (r, h) => r.recipientId === h.id || (!r.recipientId && !!r.recipientName && byName(r.recipientName) === h);
+const sameRecipient = (a, b) => (a.recipientId && a.recipientId === b.recipientId) || ((a.recipientName || "").trim().toLowerCase() === (b.recipientName || "").trim().toLowerCase());
+const carriedFor = (h) => S.records.filter(r => r.kind === "breeding" && r.horseId !== h.id && isRecipient(r, h));
+const recipientOf = (r) => resolve(r.recipientId, r.recipientName);
 const sortRecs = (a) => a.slice().sort((x, y) => (y.date || "").localeCompare(x.date || ""));
 
 function photoHTML(h, cls = "photo") {
@@ -115,7 +121,7 @@ function dueItems() {
   }
   for (const h of S.horses.values()) {
     const f = foalingDue(h);
-    if (f && f.n <= 60 && f.n >= -30) items.push({ h, n: f.n, what: `Foaling due (covered ${fmt(f.cover.date)}${f.cover.partnerName ? " to " + f.cover.partnerName : ""})`, kind: "breeding" });
+    if (f && f.n <= 60 && f.n >= -30) items.push({ h, n: f.n, what: f.donor ? `Foaling due: embryo transfer foal from ${f.donor.name}${f.cover.partnerName ? " by " + f.cover.partnerName : ""}` : `Foaling due (covered ${fmt(f.cover.date)}${f.cover.partnerName ? " to " + f.cover.partnerName : ""})`, kind: "breeding" });
   }
   const rd = currentRound(), sum = roundSummary(rd);
   if (sum.open && daysUntil(rd.remind) <= 30) {
@@ -149,7 +155,7 @@ function wormStatus(h, rd) {
   const notes = [];
   const a = ageOf(h.dob);
   const f = foalingDue(h);
-  const foaled = sortRecs(recs.filter(r => r.type === "Foaling"))[0];
+  const foaled = sortRecs(recs.filter(r => r.type === "Foaling" && !isET(r)).concat(carriedFor(h).filter(r => r.type === "Foaling")))[0];
   if (f && f.confirmed) notes.push("In foal: check the label suits pregnant mares");
   else if (foaled && daysUntil(foaled.date) > -180) notes.push("Lactating: check the label");
   if (dose) return { code: "done", label: `Done ${fmt(dose.date)}`, cls: "ok", notes: [dose.product].filter(Boolean), dose };
@@ -176,18 +182,28 @@ function roundSummary(rd) {
   s.open = s.due + s.fec;
   return s;
 }
-function foalingDue(h) {
-  if (h.sex !== "Mare" || ["Sold", "Deceased", "Pedigree only"].includes(h.status)) return null;
-  const rs = sortRecs(recsFor(h.id).filter(r => r.kind === "breeding"));
-  const cover = rs.find(r => r.type === "Covering / AI");
-  if (!cover) return null;
-  const after = rs.filter(r => (r.date || "") >= cover.date && r !== cover);
+// Where a covering stands: foaled, empty, or still due (with the estimated date)
+function pregnancyFrom(cover) {
+  const pool = sortRecs(recsFor(cover.horseId).filter(r => r.kind === "breeding"));
+  const after = pool.filter(r => (r.date || "") >= cover.date && r !== cover && (isET(cover) ? isET(r) && sameRecipient(r, cover) : !isET(r)));
   if (after.some(r => r.type === "Foaling")) return null;
+  if (after.some(r => r.type === "Covering / AI")) return null;
   const scan = after.find(r => r.type === "Pregnancy scan");
   if (scan && scan.result === "Empty") return null;
   const date = addDays(cover.date, GESTATION);
-  return { date, n: daysUntil(date), cover, confirmed: scan && scan.result !== "Re-check" };
+  return { date, n: daysUntil(date), cover, confirmed: scan && scan.result !== "Re-check", donor: isET(cover) ? S.horses.get(cover.horseId) : null };
 }
+// The foal this mare is carrying: her own covering, or an embryo she carries for a donor
+function foalingDue(h) {
+  if (h.sex !== "Mare" || ["Sold", "Deceased", "Pedigree only"].includes(h.status)) return null;
+  const covers = recsFor(h.id).filter(r => r.type === "Covering / AI" && !isET(r)).concat(carriedFor(h).filter(r => r.type === "Covering / AI"));
+  const cover = sortRecs(covers)[0];
+  return cover ? pregnancyFrom(cover) : null;
+}
+// Embryos from this donor that recipients are still carrying
+const embryosOut = (h) => recsFor(h.id).filter(r => r.type === "Covering / AI" && isET(r)).map(pregnancyFrom).filter(Boolean)
+  .filter(p => { const rc = recipientOf(p.cover); return !rc || sortRecs(covOf(rc))[0] === p.cover; });
+const covOf = (m) => recsFor(m.id).filter(r => r.type === "Covering / AI" && !isET(r)).concat(carriedFor(m).filter(r => r.type === "Covering / AI"));
 function duePill(n) {
   if (n < 0) return `<span class="pill bad num">${-n}d overdue</span>`;
   if (n === 0) return `<span class="pill bad">Due today</span>`;
@@ -259,7 +275,9 @@ function rowHTML(h) {
   if (h.example) flags.push(`<span class="pill muted">Example</span>`);
   if (h.status && h.status !== "On property") flags.push(`<span class="pill muted">${esc(h.status)}</span>`);
   const f = foalingDue(h);
-  if (f) flags.push(`<span class="pill breed">${f.confirmed ? "In foal" : "Covered"}</span>`);
+  if (f) flags.push(`<span class="pill breed">${f.confirmed ? "In foal" : "Covered"}${f.donor ? " (ET)" : ""}</span>`);
+  const out = embryosOut(h).length;
+  if (out) flags.push(`<span class="pill breed">${out} embryo${out > 1 ? "s" : ""} out</span>`);
   const overdue = dueItems().filter(d => d.h && d.h.id === h.id && d.n < 0).length;
   if (overdue) flags.push(`<span class="pill bad num">${overdue} overdue</span>`);
   if (inWorming(h)) { const rd = currentRound(), ws = wormStatus(h, rd); if ((ws.code === "due" || ws.code === "fec") && daysUntil(rd.remind) <= 30) flags.push(`<span class="pill ${ws.cls}">${ws.code === "fec" ? "Egg count due" : ws.label === "Overdue" ? "Worming overdue" : "Worming due"}</span>`); }
@@ -273,6 +291,7 @@ function fileView(h) {
     ["Sex", h.sex], ["Colour", h.colour], ...(() => { const b = B(h); return [b.ash ? [ASH, b.ashReg ? "Reg. " + b.ashReg : "No number yet"] : ["", ""], b.aqha ? [AQHA, b.aqhaReg ? "Reg. " + b.aqhaReg : "No number yet"] : ["", ""], ["Breed", b.other], ["Registration", b.otherReg]]; })(),
     ["Height", h.height ? h.height + " hh" : ""], ["Microchip", h.microchip], ["Brand", h.brand],
     ["Status", h.status || "On property"], ["Location", h.location],
+    ["Carried by", h.carrierName ? `${(resolve(h.carrierId, h.carrierName) || {}).name || h.carrierName} (embryo transfer)` : ""],
     ["Bred by", h.breeder], ["Owner", h.owner]
   ].filter(([, v]) => v);
   const tabs = [["health", "Health"], ["breeding", "Breeding"], ["genetics", "Genetics"], ["pedigree", "Pedigree"], ["progeny", "Progeny"]];
@@ -296,13 +315,16 @@ function tabBody(h) {
   if (S.tab === "progeny") return progenyHTML(h);
   const kind = S.tab;
   let recs = recsFor(h.id).filter(r => r.kind === kind);
+  if (kind === "breeding" && !MALE.has(h.sex)) recs = recs.concat(carriedFor(h));
   if (kind === "breeding" && MALE.has(h.sex)) {
     recs = recs.concat(S.records.filter(r => r.kind === "breeding" && r.horseId !== h.id && (r.partnerId === h.id || (r.partnerName && byName(r.partnerName) === h))));
   }
   recs = sortRecs(recs);
   const f = kind === "breeding" ? foalingDue(h) : null;
   const head = `<div class="sec-h"><h3>${kind === "health" ? "Health records" : "Breeding records"}</h3>${S.canWrite ? `<button class="btn" data-act="add-rec">+ ${kind === "health" ? "Health" : "Breeding"} record</button>` : ""}</div>`;
-  const preg = (kind === "health" ? wormBox(h) : "") + (f ? `<div class="notice" style="border-style:solid"><p><strong>${f.confirmed ? "In foal" : "Covered, not yet confirmed"}.</strong> Estimated foaling <strong class="num">${fmt(f.date)}</strong> (${GESTATION} days from ${fmt(f.cover.date)}).</p>${duePill(f.n)}</div>` : "");
+  const ets = kind === "breeding" ? embryosOut(h) : [];
+  const etNote = ets.map(p => { const rc = recipientOf(p.cover); return `<div class="notice" style="border-style:solid"><p><strong>Embryo transfer:</strong> carried by ${rc ? `<button class="link" data-open="${esc(rc.id)}" data-tab="breeding">${esc(rc.name)}</button>` : esc(p.cover.recipientName)}${p.confirmed ? " (in foal)" : ""}. Estimated foaling <strong class="num">${fmt(p.date)}</strong>.</p>${duePill(p.n)}</div>`; }).join("");
+  const preg = (kind === "health" ? wormBox(h) : "") + etNote + (f ? `<div class="notice" style="border-style:solid"><p><strong>${f.confirmed ? "In foal" : "Covered, not yet confirmed"}${f.donor ? `, embryo transfer foal from <button class="link" data-open="${esc(f.donor.id)}" data-tab="breeding">${esc(f.donor.name)}</button>` : ""}.</strong> Estimated foaling <strong class="num">${fmt(f.date)}</strong> (${GESTATION} days from ${fmt(f.cover.date)}).</p>${duePill(f.n)}</div>` : "");
   if (!recs.length) return head + preg + `<p class="empty-small" style="padding-inline:0">No ${kind} records yet.${kind === "health" ? " Vaccinations, worming, farrier, dental and vet visits all go here." : MALE.has(h.sex) ? " Coverings recorded on a mare's file will list here too." : " Record coverings, scans and foalings here."}</p>`;
   return head + preg + `<ul class="recs" style="margin-top:10px">${recs.map(r => recHTML(r, h)).join("")}</ul>`;
 }
@@ -316,9 +338,12 @@ function recHTML(r, h) {
     if (r.weight) bits.push(`<span class="num">${esc(r.weight)} kg</span>`);
     if (r.batch) bits.push("batch " + esc(r.batch));
   } else {
-    if (other) bits.push(`Mare: <button class="link" data-open="${esc(other.id)}" data-tab="breeding">${esc(other.name)}</button>`);
+    if (other) bits.push(`${isRecipient(r, h) ? "Donor" : "Mare"}: <button class="link" data-open="${esc(other.id)}" data-tab="breeding">${esc(other.name)}</button>`);
+    if (other && isRecipient(r, h) && (r.partnerName || r.partnerId)) { const p = resolve(r.partnerId, r.partnerName); bits.push(`Sire: ${p ? `<button class="link" data-open="${esc(p.id)}" data-tab="breeding">${esc(p.name)}</button>` : esc(r.partnerName)}`); }
+    else if (other) {}
     else if (r.partnerName || r.partnerId) { const p = resolve(r.partnerId, r.partnerName); bits.push(`${r.type === "Foaling" ? "Sire" : "Stallion"}: ${p ? `<button class="link" data-open="${esc(p.id)}" data-tab="breeding">${esc(p.name)}</button>` : esc(r.partnerName)}`); }
     if (r.method) bits.push(esc(r.method));
+    if (isET(r) && !isRecipient(r, h)) { const rc = recipientOf(r); bits.push(`Recipient: ${rc ? `<button class="link" data-open="${esc(rc.id)}" data-tab="breeding">${esc(rc.name)}</button>` : esc(r.recipientName)}`); }
     if (r.type === "Covering / AI" && r.date) bits.push(`est. foaling ${fmt(addDays(r.date, GESTATION))}`);
     if (r.type === "Covering / AI") { const mare = other || h, stal = other ? h : resolve(r.partnerId, r.partnerName); const both = stal ? sharedGenes(mare, stal) : []; if (both.length) bits.push(`<span class="pill warn">Both carry ${esc(both.join(", "))}</span>`); }
   }
@@ -562,7 +587,8 @@ function horseSheet(h, preset = {}) {
     </div></fieldset>
     <fieldset><legend>Pedigree</legend><div class="fgrid">
       ${fld("f-sire", "Sire", inp("f-sire", x.sireId && S.horses.get(x.sireId) ? S.horses.get(x.sireId).name : x.sireName, 'list="dl-m" autocomplete="off"'), "", "Pick from your register, or type any name")}
-      ${fld("f-dam", "Dam", inp("f-dam", x.damId && S.horses.get(x.damId) ? S.horses.get(x.damId).name : x.damName, 'list="dl-f" autocomplete="off"'))}
+      ${fld("f-dam", "Dam", inp("f-dam", x.damId && S.horses.get(x.damId) ? S.horses.get(x.damId).name : x.damName, 'list="dl-f" autocomplete="off"'), "", "For an embryo transfer foal, the donor mare")}
+      ${fld("f-carrier", "Carried by (recipient mare)", inp("f-carrier", x.carrierId && S.horses.get(x.carrierId) ? S.horses.get(x.carrierId).name : (x.carrierName || ""), 'list="dl-f" autocomplete="off"'), "", "Embryo transfer foals only")}
     </div>${nameList("dl-m", k => MALE.has(k.sex) && (!h || k.id !== h.id))}${nameList("dl-f", k => !MALE.has(k.sex) && (!h || k.id !== h.id))}</fieldset>
     <fieldset><legend>Where and who</legend><div class="fgrid">
       ${fld("f-status", "Status", `<select id="f-status" name="f-status">${opt(STATUSES, x.status)}</select>`)}
@@ -584,7 +610,8 @@ function horseSheet(h, preset = {}) {
         return { ash, aqha, ashReg: ash ? val(f, "f-ashReg") : "", aqhaReg: aqha ? val(f, "f-aqhaReg") : "", otherBreed: other, breed: [ash && ASH, aqha && AQHA, other].filter(Boolean).join(" & ") }; })(),
       height: val(f, "f-height"), microchip: val(f, "f-microchip"), brand: val(f, "f-brand"),
       regNo: val(f, "f-regNo"), sireName: val(f, "f-sire"), sireId: sire && sire.id !== id ? sire.id : "",
-      damName: val(f, "f-dam"), damId: dam && dam.id !== id ? dam.id : "", status: val(f, "f-status"),
+      damName: val(f, "f-dam"), damId: dam && dam.id !== id ? dam.id : "",
+      carrierName: val(f, "f-carrier"), carrierId: (byName(val(f, "f-carrier")) || {}).id || "", status: val(f, "f-status"),
       location: val(f, "f-location"), breeder: val(f, "f-breeder"), owner: val(f, "f-owner"), notes: val(f, "f-notes"),
       genetics: (h && h.genetics) || {}, genDate: (h && h.genDate) || "", genLab: (h && h.genLab) || "", genRef: (h && h.genRef) || "", photo: (h && h.photo) || "", example: !!(h && h.example), updatedAt: new Date().toISOString()
     };
@@ -628,6 +655,7 @@ function recSheet(h, kind, r, preset = {}) {
       ` : `
         ${fld("r-partner", h.sex === "Mare" || h.sex === "Filly" ? "Stallion" : "Mare", inp("r-partner", partner, 'list="dl-p" autocomplete="off"'))}
         ${fld("r-method", "Method", `<select id="r-method" name="r-method">${opt(METHODS, x.method, "—")}</select>`)}
+        ${!MALE.has(h.sex) ? fld("r-recipient", "Recipient mare (embryo transfer)", inp("r-recipient", x.recipientId && S.horses.get(x.recipientId) ? S.horses.get(x.recipientId).name : (x.recipientName || ""), 'list="dl-rcp" autocomplete="off" placeholder="Leave blank if she carries the foal"'), "", "The mare who carries the foal. The pedigree stays with this mare.") + nameList("dl-rcp", k => k.id !== h.id && (k.sex === "Mare" || k.sex === "Filly")) : ""}
         ${fld("r-result", "Result", `<select id="r-result" name="r-result">${opt(x.type === "Foaling" ? FOAL_RESULTS : SCAN_RESULTS, x.result, "—")}</select>`)}
         ${nameList("dl-p", k => k.id !== h.id)}
       `}
@@ -645,7 +673,11 @@ function recSheet(h, kind, r, preset = {}) {
         epg: t === "Faecal egg count" ? val(f, "r-epg") : "", weight: t === "Worming" ? val(f, "r-weight") : "", batch: t === "Worming" ? val(f, "r-batch") : "" });
       if (t === "Faecal egg count" && (doc.epg === "" || isNaN(Number(doc.epg)))) { toast("Enter the egg count as a number of eggs per gram."); return false; }
     }
-    else { const p = byName(val(f, "r-partner")); Object.assign(doc, { partnerName: val(f, "r-partner"), partnerId: p ? p.id : "", method: val(f, "r-method"), result: val(f, "r-result") }); }
+    else {
+      const p = byName(val(f, "r-partner")), rn = val(f, "r-recipient"), rc = byName(rn);
+      Object.assign(doc, { partnerName: val(f, "r-partner"), partnerId: p ? p.id : "", method: val(f, "r-method"), result: val(f, "r-result"), recipientName: rn, recipientId: rc && rc.id !== h.id ? rc.id : "" });
+      if (rn && doc.type === "Covering / AI" && !doc.method) doc.method = "Embryo transfer";
+    }
     const id = r ? r.id : uid("r");
     if (!(await write(() => S.db.collection("records").doc(id).set(doc)))) return false;
     S.tab = x.kind; toast("Record saved"); render();
@@ -695,7 +727,7 @@ async function exportCSV(which) {
   const stamp = iso(today());
   const data = which === "horses"
     ? toCSV([["Name", h => h.name], ["Stable name", h => h.stableName], ["Sex", h => h.sex], ["Foaled", h => h.dob], ["Age", h => ageOf(h.dob) ?? ""], ["Colour", h => h.colour], ["Breed", h => h.breed], ["Height (hh)", h => h.height], ["Microchip", h => h.microchip], ["Brand", h => h.brand], ["ASH reg. no.", h => B(h).ash ? B(h).ashReg || "Yes" : ""], ["AQHA reg. no.", h => B(h).aqha ? B(h).aqhaReg || "Yes" : ""], ["Other registration", h => B(h).otherReg], ["Sire", h => parentName(h, "sire")], ["Dam", h => parentName(h, "dam")], ["Status", h => h.status], ["Location", h => h.location], ["Bred by", h => h.breeder], ["Owner", h => h.owner], ...GENE_TESTS.map(([k]) => [geneName(k), h => (h.genetics || {})[k] || ""]), ["Genetic test date", h => h.genDate], ["Notes", h => h.notes]], [...S.horses.values()].sort((a, b) => a.name.localeCompare(b.name)))
-    : toCSV([["Horse", r => (S.horses.get(r.horseId) || {}).name], ["Kind", r => r.kind], ["Type", r => r.type], ["Date", r => r.date], ["Product / work", r => r.product], ["By", r => r.by], ["Next due", r => r.due], ["Eggs per gram", r => r.epg], ["Weight (kg)", r => r.weight], ["Batch", r => r.batch],["Partner", r => r.partnerName], ["Method", r => r.method], ["Result", r => r.result], ["Cost", r => r.cost], ["Notes", r => r.details]], sortRecs(S.records));
+    : toCSV([["Horse", r => (S.horses.get(r.horseId) || {}).name], ["Kind", r => r.kind], ["Type", r => r.type], ["Date", r => r.date], ["Product / work", r => r.product], ["By", r => r.by], ["Next due", r => r.due], ["Eggs per gram", r => r.epg], ["Weight (kg)", r => r.weight], ["Batch", r => r.batch],["Partner", r => r.partnerName], ["Recipient mare", r => r.recipientName || ""], ["Method", r => r.method], ["Result", r => r.result], ["Cost", r => r.cost], ["Notes", r => r.details]], sortRecs(S.records));
   try { await S.downloads.save({ filename: `camelock-${which}-${stamp}.csv`, data }); }
   catch (e) { if (e && e.code !== "cancelled" && e.code !== "declined") toast("The export didn't save."); }
 }
@@ -774,7 +806,7 @@ document.addEventListener("click", e => {
     case "add-foal": {
       const r = S.records.find(x => x.id === a.dataset.rec);
       const sire = resolve(r.partnerId, r.partnerName);
-      horseSheet(null, { dob: r.date, sex: r.result === "Colt" ? "Colt" : "Filly", damName: h.name, damId: h.id, sireName: sire ? sire.name : (r.partnerName || ""), sireId: sire ? sire.id : "", ash: B(h).ash, aqha: B(h).aqha, otherBreed: B(h).other, fromFoaling: r.id, breeder: h.breeder });
+      horseSheet(null, { dob: r.date, sex: r.result === "Colt" ? "Colt" : "Filly", damName: h.name, damId: h.id, sireName: sire ? sire.name : (r.partnerName || ""), sireId: sire ? sire.id : "", ash: B(h).ash, aqha: B(h).aqha, otherBreed: B(h).other, fromFoaling: r.id, breeder: h.breeder, carrierName: recipientOf(r) ? recipientOf(r).name : (r.recipientName || ""), carrierId: recipientOf(r) ? recipientOf(r).id : "" });
       break;
     }
     case "clear-examples": if (S.armed === "examples") clearExamples(); else { S.armed = "examples"; render(); } break;
