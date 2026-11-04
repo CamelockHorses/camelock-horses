@@ -46,6 +46,9 @@ const METHODS = ["Natural (paddock)", "Natural (hand)", "AI chilled", "AI frozen
 const SCAN_RESULTS = ["In foal", "Empty", "Twins", "Re-check"];
 const FOAL_RESULTS = ["Filly", "Colt", "Lost / stillborn"];
 const GESTATION = 340;
+// Movement reasons, and the status a horse usually has after each one
+const MOVE_TYPES = ["Agistment", "Show / event", "Vet / clinic", "Breeding / stud", "Training", "Sale", "Purchase / arrival", "Returned home", "Paddock change", "Other"];
+const MOVE_STATUS = { "Agistment": "Agisted / away", "Show / event": "Agisted / away", "Vet / clinic": "Agisted / away", "Breeding / stud": "Agisted / away", "Training": "Agisted / away", "Sale": "Sold", "Purchase / arrival": "On property", "Returned home": "On property", "Paddock change": "On property" };
 const FILTERS = [
   ["current", "Current herd"], ["Mare", "Mares"], ["Stallion", "Stallions"], ["Gelding", "Geldings"],
   ["young", "Young stock"], ["gone", "Sold & deceased"], ["Pedigree only", "Pedigree only"], ["all", "All"]
@@ -96,6 +99,22 @@ const sameRecipient = (a, b) => (a.recipientId && a.recipientId === b.recipientI
 const carriedFor = (h) => S.records.filter(r => r.kind === "breeding" && r.horseId !== h.id && isRecipient(r, h));
 const recipientOf = (r) => resolve(r.recipientId, r.recipientName);
 const sortRecs = (a) => a.slice().sort((x, y) => (y.date || "").localeCompare(x.date || ""));
+const KIND_LABEL = { health: "Health", breeding: "Breeding", movement: "Movement" };
+const lastMove = (id) => sortRecs(S.records.filter(r => r.kind === "movement" && r.horseId === id))[0] || null;
+// An "expected back" date only counts on the horse's latest movement, while it is still away
+const dueBack = (r) => { if (r.kind !== "movement" || !r.due) return false; const h = S.horses.get(r.horseId); return !!h && lastMove(h.id) === r && (h.status || "On property") === "Agisted / away"; };
+function awayNote(h) {
+  const m = lastMove(h.id);
+  if (!m || (h.status || "On property") !== "Agisted / away") return "";
+  return `<div class="notice" style="border-style:solid"><p><strong>Away${m.to ? " at " + esc(m.to) : ""}</strong> since <span class="num">${fmt(m.date)}</span>${m.type ? ` (${esc(m.type.toLowerCase())})` : ""}.${m.due ? ` Expected back <strong class="num">${fmt(m.due)}</strong>.` : ""}</p>${m.due ? duePill(daysUntil(m.due)) : ""}</div>`;
+}
+// Places and PIC numbers already used, so they can be picked again
+function knownPlaces() {
+  const pic = new Map();
+  for (const r of sortRecs(S.records).reverse()) if (r.kind === "movement") { if (r.from) pic.set(r.from.trim(), r.fromPIC || pic.get(r.from.trim()) || ""); if (r.to) pic.set(r.to.trim(), r.toPIC || pic.get(r.to.trim()) || ""); }
+  for (const h of S.horses.values()) if (h.location && !pic.has(h.location.trim())) pic.set(h.location.trim(), "");
+  return pic;
+}
 
 function photoHTML(h, cls = "photo") {
   if (h.photo) return `<div class="${cls}"><img data-photo="${esc(h.photo)}" alt=""></div>`;
@@ -119,6 +138,11 @@ function dueItems() {
     if (["Sold", "Deceased", "Pedigree only"].includes(h.status)) continue;
     const n = daysUntil(r.due);
     if (n <= 30) items.push({ h, n, what: `${r.type}${r.product ? " · " + r.product : ""}`, kind: "health" });
+  }
+  for (const r of S.records) {
+    if (!dueBack(r)) continue;
+    const h = S.horses.get(r.horseId);
+    if (h && daysUntil(r.due) <= 30) items.push({ h, n: daysUntil(r.due), what: `Due back${r.to ? " from " + r.to : ""}`, kind: "movement" });
   }
   for (const h of S.horses.values()) {
     const f = foalingDue(h);
@@ -223,7 +247,7 @@ function render() {
   if (!S.loaded.horses || !S.loaded.records) return;
   const m = location.hash.match(/^#h-([A-Za-z0-9-]+)$/);
   const h = m && S.horses.get(m[1]);
-  app.innerHTML = h ? fileView(h) : location.hash === "#worming" ? wormView() : location.hash === "#mating" ? matingView() : listView();
+  app.innerHTML = h ? fileView(h) : location.hash === "#worming" ? wormView() : location.hash === "#mating" ? matingView() : location.hash === "#movements" ? movesView() : listView();
   loadPhotos();
 }
 
@@ -239,6 +263,8 @@ function listView() {
 
   const rd = currentRound(), sum = roundSummary(rd);
   parts.push(`<button class="worm-card mate-card" data-goto="mating"><span class="eyebrow">Breeding planner</span><span class="wc-prod">Plan a mating</span><span class="wc-sub">Pick a stallion and a mare to see the foal's pedigree and genetic odds</span><span class="wc-go">Open →</span></button>`);
+  const awayN = [...S.horses.values()].filter(k => k.status === "Agisted / away").length, moveN = S.records.filter(r => r.kind === "movement").length;
+  parts.push(`<button class="worm-card move-card" data-goto="movements"><span class="eyebrow">Movements</span><span class="wc-prod">${awayN ? `${awayN} horse${awayN > 1 ? "s" : ""} away` : "All horses home"}</span><span class="wc-sub">${moveN ? `${moveN} movement${moveN > 1 ? "s" : ""} recorded, with PICs and waybills` : "Record trips from a horse's Movements tab"}</span><span class="wc-go">Open log →</span></button>`);
   parts.push(`<button class="worm-card" data-goto="worming"><span class="eyebrow">Worming plan · ${esc(rd.label)} (${rd.month})</span><span class="wc-prod">${esc(rd.product.name)}</span><span class="wc-sub">${sum.rows.length ? [sum.due && `${sum.due} to dose`, sum.fec && `${sum.fec} need egg counts`, sum.done && `${sum.done} done`, sum.skip && `${sum.skip} skipping`].filter(Boolean).join(" · ") || "Nothing to do this round" : "Add horses to see who needs a dose"}</span><span class="wc-go">Open plan →</span></button>`);
 
   const q = S.q.trim().toLowerCase();
@@ -304,7 +330,7 @@ function fileView(h) {
     ["Carried by", h.carrierName ? `${(resolve(h.carrierId, h.carrierName) || {}).name || h.carrierName} (embryo transfer)` : ""],
     ["Bred by", h.breeder], ["Owner", h.owner]
   ].filter(([, v]) => v);
-  const tabs = [["health", "Health"], ["breeding", "Breeding"], ["genetics", "Genetics"], ["pedigree", "Pedigree"], ["progeny", "Progeny"]];
+  const tabs = [["health", "Health"], ["breeding", "Breeding"], ["movement", "Movements"], ["genetics", "Genetics"], ["pedigree", "Pedigree"], ["progeny", "Progeny"]];
   return `
   <button class="btn ghost back" data-act="back">← Register</button>
   <section class="file-head">${photoHTML(h)}<div>
@@ -331,18 +357,25 @@ function tabBody(h) {
   }
   recs = sortRecs(recs);
   const f = kind === "breeding" ? foalingDue(h) : null;
-  const head = `<div class="sec-h"><h3>${kind === "health" ? "Health records" : "Breeding records"}</h3>${S.canWrite ? `<button class="btn" data-act="add-rec">+ ${kind === "health" ? "Health" : "Breeding"} record</button>` : ""}</div>`;
+  const head = `<div class="sec-h"><h3>${KIND_LABEL[kind]} records</h3>${S.canWrite ? `<button class="btn" data-act="add-rec">+ ${kind === "movement" ? "Movement" : KIND_LABEL[kind] + " record"}</button>` : ""}</div>`;
   const ets = kind === "breeding" ? embryosOut(h) : [];
   const etNote = ets.map(p => { const rc = recipientOf(p.cover); return `<div class="notice" style="border-style:solid"><p><strong>Embryo transfer:</strong> carried by ${rc ? `<button class="link" data-open="${esc(rc.id)}" data-tab="breeding">${esc(rc.name)}</button>` : esc(p.cover.recipientName)}${p.confirmed ? " (in foal)" : ""}. Estimated foaling <strong class="num">${fmt(p.date)}</strong>.</p>${duePill(p.n)}</div>`; }).join("");
   const preg = (kind === "health" ? wormBox(h) : "") + etNote + (f ? `<div class="notice" style="border-style:solid"><p><strong>${f.confirmed ? "In foal" : "Covered, not yet confirmed"}${f.donor ? `, embryo transfer foal from <button class="link" data-open="${esc(f.donor.id)}" data-tab="breeding">${esc(f.donor.name)}</button>` : ""}.</strong> Estimated foaling <strong class="num">${fmt(f.date)}</strong> (${GESTATION} days from ${fmt(f.cover.date)}).</p>${duePill(f.n)}</div>` : "");
-  if (!recs.length) return head + preg + `<p class="empty-small" style="padding-inline:0">No ${kind} records yet.${kind === "health" ? " Vaccinations, worming, farrier, dental and vet visits all go here." : MALE.has(h.sex) ? " Coverings recorded on a mare's file will list here too." : " Record coverings, scans and foalings here."}</p>`;
-  return head + preg + `<ul class="recs" style="margin-top:10px">${recs.map(r => recHTML(r, h)).join("")}</ul>`;
+  const away = kind === "movement" ? awayNote(h) : "";
+  if (!recs.length) return head + preg + away + `<p class="empty-small" style="padding-inline:0">No ${kind} records yet.${kind === "movement" ? " Record each trip off or onto the property, with the PIC numbers and waybill, so you have a full movement history." : kind === "health" ? " Vaccinations, worming, farrier, dental and vet visits all go here." : MALE.has(h.sex) ? " Coverings recorded on a mare's file will list here too." : " Record coverings, scans and foalings here."}</p>`;
+  return head + preg + away + `<ul class="recs" style="margin-top:10px">${recs.map(r => recHTML(r, h)).join("")}</ul>`;
 }
 
 function recHTML(r, h) {
   const other = r.horseId !== h.id ? S.horses.get(r.horseId) : null;
   const bits = [];
-  if (r.kind === "health") {
+  if (r.kind === "movement") {
+    const place = (n, pic) => n || pic ? `${esc(n || "Unnamed place")}${pic ? ` <span class="num">(PIC ${esc(pic)})</span>` : ""}` : "";
+    const fr = place(r.from, r.fromPIC), to = place(r.to, r.toPIC);
+    if (fr || to) bits.push(`${fr ? "From " + fr : ""}${fr && to ? " to " : to ? "To " : ""}${to}`);
+    if (r.by) bits.push("Transport: " + esc(r.by));
+    if (r.waybill) bits.push(`Waybill <span class="num">${esc(r.waybill)}</span>`);
+  } else if (r.kind === "health") {
     if (r.product) bits.push(esc(r.product));
     if (r.by) bits.push("by " + esc(r.by));
     if (r.weight) bits.push(`<span class="num">${esc(r.weight)} kg</span>`);
@@ -360,7 +393,8 @@ function recHTML(r, h) {
   const side = [];
   if (r.type === "Faecal egg count" && r.epg !== "" && r.epg != null) { const e = Number(r.epg); side.push(`<span class="pill ${e > FEC_HIGH ? "bad" : e >= FEC_LIMIT ? "warn" : "ok"} num">${e} epg</span>`); }
   if (r.result) side.push(`<span class="pill ${r.result === "Empty" || r.result.startsWith("Lost") ? "muted" : "breed"}">${esc(r.result)}</span>`);
-  if (r.due) side.push(`<span class="d">Next ${fmt(r.due)}</span>${daysUntil(r.due) <= 30 ? duePill(daysUntil(r.due)) : ""}`);
+  if (r.due && r.kind === "movement") side.push(`<span class="d">Back ${fmt(r.due)}</span>${dueBack(r) ? duePill(daysUntil(r.due)) : ""}`);
+  else if (r.due) side.push(`<span class="d">Next ${fmt(r.due)}</span>${daysUntil(r.due) <= 30 ? duePill(daysUntil(r.due)) : ""}`);
   if (r.cost) side.push(`<span class="d num">$${Number(r.cost).toFixed(2)}</span>`);
   const foot = [];
   if (r.type === "Foaling" && r.foalId && S.horses.get(r.foalId)) foot.push(`<button class="link" data-open="${esc(r.foalId)}">Open foal: ${esc(S.horses.get(r.foalId).name)}</button>`);
@@ -384,6 +418,17 @@ function wormBox(h) {
     <span class="wc-sub">${ws.code === "skip" || ws.code === "vet" ? "" : esc(rd.product.actives) + (ws.notes.length ? " · " : "")}${esc(ws.notes.join(" · "))}</span>
     <button class="link" data-goto="worming" style="justify-self:start;font-size:13px">See the full plan</button></div>
     <div class="wb-side"><span class="pill ${ws.cls}">${esc(ws.label)}</span>${btns}</div></div>`;
+}
+
+function movesView() {
+  const away = [...S.horses.values()].filter(k => k.status === "Agisted / away").sort((a, b) => a.name.localeCompare(b.name));
+  const moves = sortRecs(S.records.filter(r => r.kind === "movement" && S.horses.has(r.horseId)));
+  const awayRows = away.map(k => { const m = lastMove(k.id); return `<li class="wr"><button class="link wr-name" data-open="${esc(k.id)}" data-tab="movement">${esc(k.name)}</button>${m && m.due ? duePill(daysUntil(m.due)) : "<span></span>"}<span class="wr-note">${esc(k.location || (m && m.to) || "Location not recorded")}${m ? ` · since <span class="num">${fmt(m.date)}</span>` : ""}${m && m.due ? ` · back <span class="num">${fmt(m.due)}</span>` : ""}</span></li>`; }).join("");
+  const log = moves.map(r => { const k = S.horses.get(r.horseId); return recHTML(r, k).replace(`<span class="t">${esc(r.type)}</span>`, `<span class="t"><button class="link" data-open="${esc(k.id)}" data-tab="movement">${esc(k.name)}</button> · ${esc(r.type)}</span>`); }).join("");
+  return `<button class="btn ghost back" data-act="back">← Register</button>
+  <section class="panel"><div class="panel-h"><h2>Away from home</h2><span class="eyebrow num">${away.length}</span></div>${away.length ? `<ul class="wlist">${awayRows}</ul>` : `<p class="empty-small">Every current horse is on the property.</p>`}</section>
+  <section><div class="sec-h"><h3>Movement log</h3><button class="btn ghost" data-act="export-moves">Export (CSV)</button></div>
+  ${moves.length ? `<ul class="recs" style="margin-top:10px">${log}</ul>` : `<p class="empty-small" style="padding-inline:0">No movements yet. Open a horse, choose the Movements tab, and add one. You can add the other horses on the same truck at once.</p>`}</section>`;
 }
 
 function wormView() {
@@ -645,16 +690,30 @@ function horseSheet(h, preset = {}) {
 }
 
 function recSheet(h, kind, r, preset = {}) {
-  const x = Object.assign({ kind, type: kind === "health" ? "Vaccination" : "Covering / AI", date: iso(today()) }, preset, r || {});
-  const types = x.kind === "health" ? HEALTH_TYPES : BREED_TYPES;
+  const x = Object.assign({ kind, type: kind === "health" ? "Vaccination" : kind === "movement" ? "Agistment" : "Covering / AI", date: iso(today()) }, kind === "movement" && !r ? { from: h.location || "" } : {}, preset, r || {});
+  const types = x.kind === "health" ? HEALTH_TYPES : x.kind === "movement" ? MOVE_TYPES : BREED_TYPES;
+  const places = x.kind === "movement" ? knownPlaces() : new Map();
+  const latest = x.kind === "movement" ? lastMove(h.id) : null;
+  const isLatest = !latest || (r && latest.id === r.id) || (x.date || "") >= (latest.date || "");
   const partner = x.partnerId && S.horses.get(x.partnerId) ? S.horses.get(x.partnerId).name : (x.partnerName || "");
   const form = openSheet(`
-    <h2>${r ? "Edit record" : (x.kind === "health" ? "Health record" : "Breeding record")} · ${esc(h.name)}</h2>
-    <div class="tabs" role="tablist">${["health", "breeding"].map(k => `<button type="button" class="tab" role="tab" aria-selected="${x.kind === k}" data-kind="${k}" ${r ? "disabled" : ""}>${k === "health" ? "Health" : "Breeding"}</button>`).join("")}</div>
+    <h2>${r ? "Edit record" : KIND_LABEL[x.kind] + " record"} · ${esc(h.name)}</h2>
+    <div class="tabs" role="tablist">${["health", "breeding", "movement"].map(k => `<button type="button" class="tab" role="tab" aria-selected="${x.kind === k}" data-kind="${k}" ${r ? "disabled" : ""}>${KIND_LABEL[k]}</button>`).join("")}</div>
     <div class="fgrid">
-      ${fld("r-type", "Type", `<select id="r-type" name="r-type">${opt(types, x.type)}</select>`)}
+      ${fld("r-type", x.kind === "movement" ? "Reason" : "Type", `<select id="r-type" name="r-type">${opt(types, x.type)}</select>`)}
       ${fld("r-date", "Date", inp("r-date", x.date, 'type="date"'))}
-      ${x.kind === "health" ? `
+      ${x.kind === "movement" ? `
+        ${fld("r-from", "From", inp("r-from", x.from, 'list="dl-place" autocomplete="off" placeholder="Property or place"'))}
+        ${fld("r-fromPIC", "From PIC", inp("r-fromPIC", x.fromPIC, 'autocomplete="off" autocapitalize="characters" placeholder="e.g. NA123456"'))}
+        ${fld("r-to", "To", inp("r-to", x.to, 'list="dl-place" autocomplete="off" placeholder="Property or place"'))}
+        ${fld("r-toPIC", "To PIC", inp("r-toPIC", x.toPIC, 'autocomplete="off" autocapitalize="characters"'))}
+        ${fld("r-by", "Transported by", inp("r-by", x.by, 'placeholder="Self, or transport company"'))}
+        ${fld("r-waybill", "Waybill / travel statement no.", inp("r-waybill", x.waybill))}
+        ${fld("r-due", "Expected back", inp("r-due", x.due, 'type="date"'), "", "Leave blank if not coming back")}
+        ${fld("r-status", "Horse's status after this move", `<select id="r-status" name="r-status">${opt(STATUSES.filter(st => st !== "Pedigree only"), r ? (h.status || "On property") : (MOVE_STATUS[x.type] || h.status || "On property"))}</select>`, "", isLatest ? "Also updates the status and location on the horse's file" : "An older move, so the horse's file won't change")}
+        <datalist id="dl-place">${[...places.keys()].sort().map(pl => `<option value="${esc(pl)}"></option>`).join("")}</datalist>
+        ${r ? "" : `<div class="field wide"><label for="r-also">Other horses on this trip</label><div class="chips" id="also-chips"></div>${inp("r-also", "", 'list="dl-also" autocomplete="off" placeholder="Type a name to add"')}<span class="hint">Each horse gets its own copy of this movement</span>${nameList("dl-also", k => k.id !== h.id && !["Sold", "Deceased", "Pedigree only"].includes(k.status))}</div>`}
+      ` : x.kind === "health" ? `
         ${fld("r-epg", "Eggs per gram", inp("r-epg", x.epg, 'inputmode="numeric"'), "only-fec", `Under ${FEC_LIMIT}: skip the spring dose`)}
         ${fld("r-product", "Product / work done", inp("r-product", x.product, 'list="dl-worm" autocomplete="off" placeholder="e.g. 2-in-1, Equimax, front shoes"'), "not-fec", "")}
         ${fld("r-weight", "Weight (kg)", inp("r-weight", x.weight, 'inputmode="decimal"'), "only-worm")}
@@ -683,6 +742,11 @@ function recSheet(h, kind, r, preset = {}) {
         epg: t === "Faecal egg count" ? val(f, "r-epg") : "", weight: t === "Worming" ? val(f, "r-weight") : "", batch: t === "Worming" ? val(f, "r-batch") : "" });
       if (t === "Faecal egg count" && (doc.epg === "" || isNaN(Number(doc.epg)))) { toast("Enter the egg count as a number of eggs per gram."); return false; }
     }
+    else if (x.kind === "movement") {
+      Object.assign(doc, { from: val(f, "r-from"), fromPIC: val(f, "r-fromPIC").toUpperCase(), to: val(f, "r-to"), toPIC: val(f, "r-toPIC").toUpperCase(), by: val(f, "r-by"), waybill: val(f, "r-waybill"), due: val(f, "r-due") });
+      if (!doc.to) { toast("Add where the horse went."); return false; }
+      if (doc.due && doc.due < date) { toast("The expected back date is before the move."); return false; }
+    }
     else {
       const p = byName(val(f, "r-partner")), rn = val(f, "r-recipient"), rc = byName(rn);
       Object.assign(doc, { partnerName: val(f, "r-partner"), partnerId: p ? p.id : "", method: val(f, "r-method"), result: val(f, "r-result"), recipientName: rn, recipientId: rc && rc.id !== h.id ? rc.id : "" });
@@ -690,9 +754,35 @@ function recSheet(h, kind, r, preset = {}) {
     }
     const id = r ? r.id : uid("r");
     if (!(await write(() => S.db.collection("records").doc(id).set(doc)))) return false;
+    if (x.kind === "movement") {
+      const status = val(f, "r-status");
+      // Only the newest move for each horse changes its file
+      const newest = (t, except) => !S.records.some(q => q.kind === "movement" && q.horseId === t.id && q.id !== except && (q.date || "") > date);
+      const moves = [[h, id], ...also.map(t => [t, uid("r")])];
+      for (const [t, rid] of moves) {
+        if (t !== h) await write(() => S.db.collection("records").doc(rid).set(Object.assign({}, doc, { horseId: t.id, example: false })));
+        if (newest(t, rid)) await write(() => S.db.collection("horses").doc(t.id).update({ status, location: doc.to }));
+      }
+      S.tab = "movement"; toast(moves.length > 1 ? `Movement saved for ${moves.length} horses` : "Movement saved"); render(); return;
+    }
     S.tab = x.kind; toast("Record saved"); render();
   });
   form.querySelectorAll("[data-kind]").forEach(b => b.addEventListener("click", () => recSheet(h, b.dataset.kind)));
+  const also = [];
+  if (x.kind === "movement") {
+    const typeEl = form.elements["r-type"], stEl = form.elements["r-status"];
+    if (!r) typeEl.addEventListener("change", () => { if (MOVE_STATUS[typeEl.value]) stEl.value = MOVE_STATUS[typeEl.value]; });
+    // Fill a PIC from the last time that place was used
+    for (const k of ["from", "to"]) form.elements["r-" + k].addEventListener("change", e => { const pic = places.get(e.target.value.trim()), pe = form.elements["r-" + k + "PIC"]; if (pic && !pe.value) pe.value = pic; });
+    const alsoIn = form.elements["r-also"], chips = $("#also-chips", form);
+    const drawChips = () => { chips.innerHTML = also.map((t, i) => `<button type="button" class="chip" aria-pressed="true" data-rm="${i}" aria-label="Remove ${esc(t.name)}">${esc(t.name)} ✕</button>`).join(""); };
+    if (alsoIn) {
+      const add = () => { const t = byName(alsoIn.value); if (t && t.id !== h.id && !also.includes(t)) { also.push(t); drawChips(); alsoIn.value = ""; } };
+      alsoIn.addEventListener("change", add);
+      alsoIn.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+      chips.addEventListener("click", e => { const b = e.target.closest("[data-rm]"); if (b) { also.splice(+b.dataset.rm, 1); drawChips(); } });
+    }
+  }
   const typeSel = form.elements["r-type"], resSel = form.elements["r-result"];
   if (resSel) typeSel.addEventListener("change", () => { resSel.innerHTML = opt(typeSel.value === "Foaling" ? FOAL_RESULTS : SCAN_RESULTS, "", "—"); });
   if (x.kind === "health") {
@@ -735,9 +825,11 @@ const csvCell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"
 const toCSV = (cols, rows) => [cols.map(c => c[0]).join(","), ...rows.map(r => cols.map(c => csvCell(c[1](r))).join(","))].join("\n");
 async function exportCSV(which) {
   const stamp = iso(today());
-  const data = which === "horses"
+  const data = which === "moves"
+    ? toCSV([["Date", r => r.date], ["Horse", r => (S.horses.get(r.horseId) || {}).name], ["Microchip", r => (S.horses.get(r.horseId) || {}).microchip], ["Brand", r => (S.horses.get(r.horseId) || {}).brand], ["Reason", r => r.type], ["From", r => r.from], ["From PIC", r => r.fromPIC], ["To", r => r.to], ["To PIC", r => r.toPIC], ["Transported by", r => r.by], ["Waybill", r => r.waybill], ["Expected back", r => r.due], ["Cost", r => r.cost], ["Notes", r => r.details]], sortRecs(S.records.filter(r => r.kind === "movement")))
+    : which === "horses"
     ? toCSV([["Name", h => h.name], ["Stable name", h => h.stableName], ["Sex", h => h.sex], ["Foaled", h => h.dob], ["Age", h => ageOf(h.dob) ?? ""], ["Colour", h => h.colour], ["Breed", h => h.breed], ["Height (hh)", h => h.height], ["Microchip", h => h.microchip], ["Brand", h => h.brand], ["ASH reg. no.", h => B(h).ash ? B(h).ashReg || "Yes" : ""], ["AQHA reg. no.", h => B(h).aqha ? B(h).aqhaReg || "Yes" : ""], ["Other registration", h => B(h).otherReg], ["Sire", h => parentName(h, "sire")], ["Dam", h => parentName(h, "dam")], ["Status", h => h.status], ["Location", h => h.location], ["Bred by", h => h.breeder], ["Owner", h => h.owner], ...GENE_TESTS.map(([k]) => [geneName(k), h => (h.genetics || {})[k] || ""]), ["Genetic test date", h => h.genDate], ["Notes", h => h.notes]], [...S.horses.values()].sort((a, b) => a.name.localeCompare(b.name)))
-    : toCSV([["Horse", r => (S.horses.get(r.horseId) || {}).name], ["Kind", r => r.kind], ["Type", r => r.type], ["Date", r => r.date], ["Product / work", r => r.product], ["By", r => r.by], ["Next due", r => r.due], ["Eggs per gram", r => r.epg], ["Weight (kg)", r => r.weight], ["Batch", r => r.batch],["Partner", r => r.partnerName], ["Recipient mare", r => r.recipientName || ""], ["Method", r => r.method], ["Result", r => r.result], ["Cost", r => r.cost], ["Notes", r => r.details]], sortRecs(S.records));
+    : toCSV([["Horse", r => (S.horses.get(r.horseId) || {}).name], ["Kind", r => r.kind], ["Type", r => r.type], ["Date", r => r.date], ["Product / work", r => r.product], ["By", r => r.by], ["Next due", r => r.due], ["Eggs per gram", r => r.epg], ["Weight (kg)", r => r.weight], ["Batch", r => r.batch],["Partner", r => r.partnerName], ["Recipient mare", r => r.recipientName || ""], ["From", r => r.from], ["From PIC", r => r.fromPIC], ["To", r => r.to], ["To PIC", r => r.toPIC], ["Waybill", r => r.waybill], ["Method", r => r.method], ["Result", r => r.result], ["Cost", r => r.cost], ["Notes", r => r.details]], sortRecs(S.records));
   try { await S.downloads.save({ filename: `camelock-${which}-${stamp}.csv`, data }); }
   catch (e) { if (e && e.code !== "cancelled" && e.code !== "declined") toast("The export didn't save."); }
 }
@@ -811,8 +903,8 @@ document.addEventListener("click", e => {
     case "edit-genes": geneSheet(h); break;
     case "plan-mate": if (h) { if (["Mare", "Filly"].includes(h.sex)) S.mate.d = h.id; else S.mate.s = h.id; } location.hash = "mating"; break;
     case "mate-cover": { const d = S.horses.get(S.mate.d), st = S.horses.get(S.mate.s); if (d && st) recSheet(d, "breeding", null, { type: "Covering / AI", partnerName: st.name, partnerId: st.id }); break; }
-    case "add-rec": recSheet(h, S.tab === "breeding" ? "breeding" : "health"); break;
-    case "edit-rec": { const r = S.records.find(x => x.id === a.dataset.rec); if (r) recSheet(h, r.kind, r); break; }
+    case "add-rec": recSheet(h, ["breeding", "movement"].includes(S.tab) ? S.tab : "health"); break;
+    case "edit-rec": { const r = S.records.find(x => x.id === a.dataset.rec); const rh = r && (h || S.horses.get(r.horseId)); if (rh) recSheet(rh, r.kind, r); break; }
     case "add-foal": {
       const r = S.records.find(x => x.id === a.dataset.rec);
       const sire = resolve(r.partnerId, r.partnerName);
@@ -822,6 +914,7 @@ document.addEventListener("click", e => {
     case "clear-examples": if (S.armed === "examples") clearExamples(); else { S.armed = "examples"; render(); } break;
     case "export-horses": exportCSV("horses"); break;
     case "export-records": exportCSV("records"); break;
+    case "export-moves": exportCSV("moves"); break;
     case "backup": saveBackup(); break;
     case "import": $("#import-file").click(); break;
     case "sign-out": platform.signOut(); break;

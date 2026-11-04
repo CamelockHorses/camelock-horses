@@ -225,3 +225,8 @@ img { max-width: 100%; }
 .owner-pick select { flex: 1; min-width: 0; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); min-height: 40px; }
 .owner-group { display: grid; gap: 8px; }
 .owner-group .reg-head h3 { font-size: 18px; }
+.rec.movement { border-left-color: var(--warn); }
+.move-card { background: var(--warn-soft); }
+.move-card .eyebrow, .move-card .wc-go { color: var(--warn); }
+#also-chips:empty { display: none; }
+#also-chips { margin-bottom: 6px; }
