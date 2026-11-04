@@ -53,7 +53,7 @@ const FILTERS = [
 
 const S = {
   db: null, assets: null, downloads: null, canWrite: true, loaded: { horses: false, records: false },
-  horses: new Map(), records: [], mate: { s: "", d: "" }, filter: "current", q: "", tab: "health", armed: null, failed: false
+  horses: new Map(), records: [], mate: { s: "", d: "" }, filter: "current", owner: (() => { try { return localStorage.getItem("owner") || ""; } catch { return ""; } })(), q: "", tab: "health", armed: null, failed: false
 };
 
 /* ---------- dates ---------- */
@@ -87,6 +87,7 @@ const breedShort = (h) => { const b = B(h); return [b.ash && "ASH", b.aqha && "A
 const byName = (name) => { if (!name) return null; const n = name.trim().toLowerCase(); for (const h of S.horses.values()) if ((h.name || "").trim().toLowerCase() === n) return h; return null; };
 const resolve = (id, name) => (id && S.horses.get(id)) || byName(name) || null;
 const parentName = (h, which) => { const p = resolve(h[which + "Id"], h[which + "Name"]); return p ? p.name : (h[which + "Name"] || ""); };
+const ownerKey = (h) => (h.owner || "").trim().toLowerCase();
 const recsFor = (id) => S.records.filter(r => r.horseId === id);
 // Embryo transfer: records stay on the donor's file and name the recipient who carries the foal
 const isET = (r) => !!(r.recipientId || r.recipientName);
@@ -242,7 +243,7 @@ function listView() {
 
   const q = S.q.trim().toLowerCase();
   const all = [...S.horses.values()];
-  const list = all.filter(h => {
+  const filtered = all.filter(h => {
     const st = h.status || "On property";
     const f = S.filter;
     if (f === "current" && !["On property", "Agisted / away"].includes(st)) return false;
@@ -250,20 +251,29 @@ function listView() {
     if (f === "young" && (!(ageOf(h.dob) !== null && ageOf(h.dob) < 3) || !["On property", "Agisted / away"].includes(st))) return false;
     if (f === "gone" && !["Sold", "Deceased"].includes(st)) return false;
     if (f === "Pedigree only" && st !== "Pedigree only") return false;
-    if (q && ![h.name, h.stableName, h.breed, breedShort(h), h.colour, h.microchip, h.brand, h.regNo, B(h).ashReg, B(h).aqhaReg].join(" ").toLowerCase().includes(q)) return false;
+    if (q && ![h.name, h.stableName, h.breed, breedShort(h), h.colour, h.microchip, h.brand, h.regNo, B(h).ashReg, B(h).aqhaReg, h.owner].join(" ").toLowerCase().includes(q)) return false;
     return true;
   }).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  // Owners among the horses the status filter and search show
+  const owners = new Map();
+  for (const h of filtered) { const k = ownerKey(h); if (!owners.has(k)) owners.set(k, { name: (h.owner || "").trim() || "No owner recorded", n: 0 }); owners.get(k).n++; }
+  const ownerList = [...owners.entries()].sort((a, b) => (a[0] === "" ? 1 : b[0] === "" ? -1 : a[1].name.localeCompare(b[1].name)));
+  const pick = S.owner === "__group" || S.owner === "" ? null : S.owner === "__none" ? "" : S.owner;
+  const list = pick === null ? filtered : filtered.filter(h => ownerKey(h) === pick);
 
   parts.push(`<section class="toolbar" aria-label="Find a horse">
     <input class="search" id="q" type="search" placeholder="Search name, microchip, brand…" value="${esc(S.q)}" autocomplete="off">
     <div class="chips" role="group" aria-label="Filter">${FILTERS.map(([k, l]) => `<button class="chip" data-filter="${k}" aria-pressed="${S.filter === k}">${l}</button>`).join("")}</div>
+    <div class="owner-pick"><label for="owner-sel">Owner</label><select id="owner-sel"><option value="" ${!S.owner ? "selected" : ""}>All owners</option><option value="__group" ${S.owner === "__group" ? "selected" : ""}>All, grouped by owner</option>${ownerList.map(([k, o]) => `<option value="${k === "" ? "__none" : esc(k)}" ${(k === "" ? "__none" : k) === S.owner ? "selected" : ""}>${esc(o.name)} (${o.n})</option>`).join("")}${S.owner && S.owner !== "__group" && !owners.has(S.owner === "__none" ? "" : S.owner) ? `<option value="${esc(S.owner)}" selected>${S.owner === "__none" ? "No owner recorded" : "Selected owner"} (0)</option>` : ""}</select></div>
   </section>`);
 
   if (!all.length) {
     parts.push(`<div class="empty"><h3>No horses yet</h3><p>Start with one horse: name, sex and date of birth are enough. You can add pedigree, health and breeding records after.</p>${S.canWrite ? `<button class="btn primary" data-act="add-horse">+ Add your first horse</button>` : ""}</div>`);
   } else {
     parts.push(`<section><div class="reg-head"><h2>Register</h2><span class="eyebrow num">${list.length} of ${all.length}</span></div></section>`);
-    parts.push(list.length ? `<ul class="herd">${list.map(rowHTML).join("")}</ul>` : `<p class="empty-small">No horses match that search.</p>`);
+    if (!list.length) parts.push(`<p class="empty-small">No horses match that search.</p>`);
+    else if (S.owner === "__group") parts.push(ownerList.map(([k, o]) => `<section class="owner-group"><div class="reg-head"><h3>${esc(o.name)}</h3><span class="eyebrow num">${o.n}</span></div><ul class="herd">${list.filter(h => ownerKey(h) === k).map(rowHTML).join("")}</ul></section>`).join(""));
+    else parts.push(`<ul class="herd">${list.map(rowHTML).join("")}</ul>`);
   }
   parts.push(`<footer><span>Ages follow the 1 August horse birthday.</span><span class="actions"><button class="btn ghost" data-act="export-horses">Export horses (CSV)</button><button class="btn ghost" data-act="export-records">Export records (CSV)</button><button class="btn ghost" data-act="backup">Download backup</button>${S.canWrite ? `<button class="btn ghost" data-act="import">Import backup</button>` : ""}<button class="btn ghost" data-act="sign-out">Sign out</button></span></footer><input type="file" id="import-file" accept="application/json,.json" hidden>`);
   return parts.join("");
@@ -594,7 +604,7 @@ function horseSheet(h, preset = {}) {
       ${fld("f-status", "Status", `<select id="f-status" name="f-status">${opt(STATUSES, x.status)}</select>`)}
       ${fld("f-location", "Paddock / location", inp("f-location", x.location))}
       ${fld("f-breeder", "Bred by", inp("f-breeder", x.breeder))}
-      ${fld("f-owner", "Owner", inp("f-owner", x.owner))}
+      ${fld("f-owner", "Owner", inp("f-owner", x.owner, 'list="dl-own" autocomplete="off"'), "", "Pick an existing owner so their horses group together")}<datalist id="dl-own">${[...new Set([...S.horses.values()].map(k => (k.owner || "").trim()).filter(Boolean))].sort().map(o => `<option value="${esc(o)}"></option>`).join("")}</datalist>
       ${S.assets ? fld("f-photo", "Photo", `<input id="f-photo" name="f-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif">`, "wide", x.photo ? "Choose a file to replace the current photo" : "") : ""}
       ${fld("f-notes", "Notes", `<textarea id="f-notes" name="f-notes" placeholder="Temperament, markings, training, feed…">${esc(x.notes)}</textarea>`, "wide")}
     </div></fieldset>
@@ -818,7 +828,7 @@ document.addEventListener("click", e => {
   }
 });
 document.addEventListener("input", e => { if (e.target.id === "q") { S.q = e.target.value; const pos = e.target.selectionStart; render(); const q = $("#q"); if (q) { q.focus(); q.setSelectionRange(pos, pos); } } });
-document.addEventListener("change", e => { if (e.target.id === "mate-s" || e.target.id === "mate-d") { S.mate[e.target.id === "mate-s" ? "s" : "d"] = e.target.value; render(); } });
+document.addEventListener("change", e => { if (e.target.id === "owner-sel") { S.owner = e.target.value; try { localStorage.setItem("owner", S.owner); } catch {} render(); return; } if (e.target.id === "mate-s" || e.target.id === "mate-d") { S.mate[e.target.id === "mate-s" ? "s" : "d"] = e.target.value; render(); } });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet(); });
 $("#add-horse").addEventListener("click", () => horseSheet(null));
 window.addEventListener("hashchange", () => { closeSheet(); render(); window.scrollTo(0, 0); });
