@@ -55,7 +55,7 @@ const FILTERS = [
 ];
 
 const S = {
-  db: null, assets: null, downloads: null, canWrite: true, loaded: { horses: false, records: false },
+  db: null, assets: null, downloads: null, canWrite: false, loaded: { horses: false, records: false },
   horses: new Map(), records: [], mate: { s: "", d: "" }, filter: "current", owner: (() => { try { return localStorage.getItem("owner") || ""; } catch { return ""; } })(), q: "", tab: "health", armed: null, failed: false
 };
 
@@ -932,7 +932,7 @@ async function start() {
   const db = await c.use("db");
   if (!db) { S.failed = true; render(); return; }
   S.db = db;
-  c.use("user").then(async u => { if (u) { const can = await u.can("data.write"); S.canWrite = can !== false; render(); } });
+  c.use("user").then(async u => { if (u) { const can = await u.can("data.write"); S.canWrite = false; render(); /* moved to app.camelockrural.com.au: read only */ } });
   c.use("assets").then(a => { S.assets = a; });
   c.use("downloads").then(d => { S.downloads = d; render(); });
   const onErr = () => { S.failed = true; render(); };

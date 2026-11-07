@@ -230,3 +230,6 @@ img { max-width: 100%; }
 .move-card .eyebrow, .move-card .wc-go { color: var(--warn); }
 #also-chips:empty { display: none; }
 #also-chips { margin-bottom: 6px; }
+
+.moved { margin: 12px 0 0; padding: 12px 14px; border-radius: 10px; background: #fff4d6; color: #5a4300; border: 1px solid #e3c46a; font-size: 14px; line-height: 1.45; }
+.moved a { color: inherit; font-weight: 600; }
